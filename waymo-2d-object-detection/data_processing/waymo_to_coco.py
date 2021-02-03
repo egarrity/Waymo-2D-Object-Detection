@@ -93,4 +93,4 @@ for blob in blobs:
             json.dump(annotations,f)
         upload_blob("waymo-processed",temp_directory+"{}.json".format(segment_name),"train/annotations/{}/{}.json".format(date,segment_name, idx, camera))
         os.remove(temp_directory+"{}.json".format(segment_name))
-        os.remove(root_directory+"{}.tfrecord".format(segment_name))
+        os.remove(root_directory+filename)
