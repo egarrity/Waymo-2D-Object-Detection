@@ -86,7 +86,7 @@ for blob in blobs:
                         annotations["annotations"].append({"id":label.id, 
                                                    "category_id":label.type,
                                                    "image_id":"{}_{}".format(segment_name, idx),
-                                                   "area":label.box.width*label.box.height,
+                                                   "area":label.box.length*label.box.width,
                                                    "bbox":bbox})
 
         with open(temp_directory+"{}.json".format(segment_name), "w") as f:
