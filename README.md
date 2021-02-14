@@ -6,3 +6,6 @@
 
 <H1>Introduction</H1>
 This project repository is used for Stanford's CS329S Winter 2021 class project. 
+
+
+Centernet model code source: https://github.com/Duankaiwen/CenterNet
