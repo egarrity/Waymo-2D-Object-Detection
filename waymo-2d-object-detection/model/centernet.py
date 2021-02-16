@@ -1,12 +1,83 @@
-
-import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+
+from lib.cpool import TopPool, BottomPool, LeftPool, RightPool
+
+
+class pool(nn.Module):
+  def __init__(self, dim, pool1, pool2):
+    super(pool, self).__init__()
+    self.p1_conv1 = convolution(3, dim, 128)
+    self.p2_conv1 = convolution(3, dim, 128)
+
+    self.p_conv1 = nn.Conv2d(128, dim, 3, padding=1, bias=False)
+    self.p_bn1 = nn.BatchNorm2d(dim)
+
+    self.conv1 = nn.Conv2d(dim, dim, 1, bias=False)
+    self.bn1 = nn.BatchNorm2d(dim)
+
+    self.conv2 = convolution(3, dim, dim)
+
+    self.pool1 = pool1()
+    self.pool2 = pool2()
+
+    self.look_conv1 = convolution(3, dim, 128)
+    self.look_conv2 = convolution(3, dim, 128)
+    self.p1_look_conv = nn.Conv2d(128, 128, 3, padding=1, bias=False)
+    self.p2_look_conv = nn.Conv2d(128, 128, 3, padding=1, bias=False)
+
+  def forward(self, x):
+    pool1 = self.pool1(self.p1_look_conv(self.p1_conv1(x) +
+                                         self.pool2(self.look_conv1(x))))
+    pool2 = self.pool2(self.p2_look_conv(self.p2_conv1(x) +
+                                         self.pool1(self.look_conv2(x))))
+
+    p_bn1 = self.p_bn1(self.p_conv1(pool1 + pool2))
+    bn1 = self.bn1(self.conv1(x))
+
+    out = self.conv2(F.relu(p_bn1 + bn1, inplace=True))
+    return out
+
+
+class pool_cross(nn.Module):
+  def __init__(self, dim):
+    super(pool_cross, self).__init__()
+    self.p1_conv1 = convolution(3, dim, 128)
+    self.p2_conv1 = convolution(3, dim, 128)
+
+    self.p_conv1 = nn.Conv2d(128, dim, 3, padding=1, bias=False)
+    self.p_bn1 = nn.BatchNorm2d(dim)
+
+    self.conv1 = nn.Conv2d(dim, dim, 1, bias=False)
+    self.bn1 = nn.BatchNorm2d(dim)
+
+    self.conv2 = convolution(3, dim, dim)
+
+    self.pool_top = TopPool()
+    self.pool_left = LeftPool()
+    self.pool_bottom = BottomPool()
+    self.pool_right = RightPool()
+
+  def forward(self, x):
+    # pool 1
+    pool1 = self.pool_bottom(self.pool_top(self.p1_conv1(x)))
+
+    # pool 2
+    pool2 = self.pool_right(self.pool_left(self.p2_conv1(x)))
+
+    # pool 1 + pool 2
+    p_bn1 = self.p_bn1(self.p_conv1(pool1 + pool2))
+    bn1 = self.bn1(self.conv1(x))
+
+    out = self.conv2(F.relu(p_bn1 + bn1, inplace=True))
+    return out
 
 
 class convolution(nn.Module):
   def __init__(self, k, inp_dim, out_dim, stride=1, with_bn=True):
     super(convolution, self).__init__()
+
     pad = (k - 1) // 2
     self.conv = nn.Conv2d(inp_dim, out_dim, (k, k), padding=(pad, pad), stride=(stride, stride), bias=not with_bn)
     self.bn = nn.BatchNorm2d(out_dim) if with_bn else nn.Sequential()
@@ -61,6 +132,9 @@ def make_layer_revr(kernel_size, inp_dim, out_dim, modules, layer):
   return nn.Sequential(*layers)
 
 
+# def make_pool_layer(dim):
+#     return nn.MaxPool2d(kernel_size=2, stride=2)
+
 # key point layer
 def make_kp_layer(cnv_dim, curr_dim, out_dim):
   return nn.Sequential(convolution(3, cnv_dim, curr_dim, with_bn=False),
@@ -79,36 +153,39 @@ class kp_module(nn.Module):
     curr_dim = dims[0]
     next_dim = dims[1]
 
-    # curr_mod x residual，curr_dim -> curr_dim -> ... -> curr_dim
+    # 上支路：重复curr_mod次residual，curr_dim -> curr_dim -> ... -> curr_dim
     self.top = make_layer(3, curr_dim, curr_dim, curr_modules, layer=residual)
+    # 分辨率本来应该在这里减半...
     self.down = nn.Sequential()
-    # curr_mod x residual，curr_dim -> next_dim -> ... -> next_dim
+    # 重复curr_mod次residual，curr_dim -> next_dim -> ... -> next_dim
+    # 实际上分辨率是在这里的第一个卷积层层降的
     self.low1 = make_layer(3, curr_dim, next_dim, curr_modules, layer=residual, stride=2)
-    # next_mod x residual，next_dim -> next_dim -> ... -> next_dim
+    # hourglass中间还是一个hourglass
+    # 直到递归结束，重复next_mod次residual，next_dim -> next_dim -> ... -> next_dim
     if self.n > 1:
       self.low2 = kp_module(n - 1, dims[1:], modules[1:])
     else:
       self.low2 = make_layer(3, next_dim, next_dim, next_modules, layer=residual)
-    # curr_mod x residual，next_dim -> next_dim -> ... -> next_dim -> curr_dim
+    # 重复curr_mod次residual，next_dim -> next_dim -> ... -> next_dim -> curr_dim
     self.low3 = make_layer_revr(3, next_dim, curr_dim, curr_modules, layer=residual)
+    # 分辨率在这里X2
     self.up = nn.Upsample(scale_factor=2)
 
   def forward(self, x):
-    up1 = self.top(x)
-    down = self.down(x)
-    low1 = self.low1(down)
-    low2 = self.low2(low1)
-    low3 = self.low3(low2)
-    up2 = self.up(low3)
-    return up1 + up2
+    up1 = self.top(x)  # 上支路residual
+    down = self.down(x)  # 下支路downsample(并没有)
+    low1 = self.low1(down)  # 下支路residual
+    low2 = self.low2(low1)  # 下支路hourglass
+    low3 = self.low3(low2)  # 下支路residual
+    up2 = self.up(low3)  # 下支路upsample
+    return up1 + up2  # 合并上下支路
 
 
 class exkp(nn.Module):
-  def __init__(self, n, nstack, dims, modules, cnv_dim=256, num_classes=80):
+  def __init__(self, n, nstack, dims, modules, num_classes=80, cnv_dim=256):
     super(exkp, self).__init__()
 
     self.nstack = nstack
-    self.num_classes = num_classes
 
     curr_dim = dims[0]
 
@@ -127,19 +204,34 @@ class exkp(nn.Module):
     self.cnvs_ = nn.ModuleList([nn.Sequential(nn.Conv2d(cnv_dim, curr_dim, (1, 1), bias=False),
                                               nn.BatchNorm2d(curr_dim))
                                 for _ in range(nstack - 1)])
+
+    self.cnvs_tl = nn.ModuleList([pool(cnv_dim, TopPool, LeftPool) for _ in range(nstack)])
+    self.cnvs_br = nn.ModuleList([pool(cnv_dim, BottomPool, RightPool) for _ in range(nstack)])
+    self.cnvs_ct = nn.ModuleList([pool_cross(cnv_dim) for _ in range(nstack)])
+
     # heatmap layers
-    self.hmap = nn.ModuleList([make_kp_layer(cnv_dim, curr_dim, num_classes) for _ in range(nstack)])
-    for hmap in self.hmap:
-      hmap[-1].bias.data.fill_(-2.19)
+    self.hmap_tl = nn.ModuleList([make_kp_layer(cnv_dim, curr_dim, num_classes) for _ in range(nstack)])
+    self.hmap_br = nn.ModuleList([make_kp_layer(cnv_dim, curr_dim, num_classes) for _ in range(nstack)])
+    self.hmap_ct = nn.ModuleList([make_kp_layer(cnv_dim, curr_dim, num_classes) for _ in range(nstack)])
+
+    # embedding layers
+    self.embd_tl = nn.ModuleList([make_kp_layer(cnv_dim, curr_dim, 1) for _ in range(nstack)])
+    self.embd_br = nn.ModuleList([make_kp_layer(cnv_dim, curr_dim, 1) for _ in range(nstack)])
+
+    for hmap_tl, hmap_br, hmap_ct in zip(self.hmap_tl, self.hmap_br, self.hmap_ct):
+      hmap_tl[-1].bias.data.fill_(-2.19)
+      hmap_br[-1].bias.data.fill_(-2.19)
+      hmap_ct[-1].bias.data.fill_(-2.19)
 
     # regression layers
-    self.regs = nn.ModuleList([make_kp_layer(cnv_dim, curr_dim, 2) for _ in range(nstack)])
-    self.w_h_ = nn.ModuleList([make_kp_layer(cnv_dim, curr_dim, 2) for _ in range(nstack)])
+    self.regs_tl = nn.ModuleList([make_kp_layer(cnv_dim, curr_dim, 2) for _ in range(nstack)])
+    self.regs_br = nn.ModuleList([make_kp_layer(cnv_dim, curr_dim, 2) for _ in range(nstack)])
+    self.regs_ct = nn.ModuleList([make_kp_layer(cnv_dim, curr_dim, 2) for _ in range(nstack)])
 
     self.relu = nn.ReLU(inplace=True)
 
-  def forward(self, image):
-    inter = self.pre(image)
+  def forward(self, inputs):
+    inter = self.pre(inputs)
 
     outs = []
     for ind in range(self.nstack):
@@ -147,7 +239,18 @@ class exkp(nn.Module):
       cnv = self.cnvs[ind](kp)
 
       if self.training or ind == self.nstack - 1:
-        outs.append([self.hmap[ind](cnv), self.regs[ind](cnv), self.w_h_[ind](cnv)])
+        cnv_tl = self.cnvs_tl[ind](cnv)
+        cnv_br = self.cnvs_br[ind](cnv)
+        cnv_ct = self.cnvs_ct[ind](cnv)
+
+        hmap_tl, hmap_br = self.hmap_tl[ind](cnv_tl), self.hmap_br[ind](cnv_br)
+        embd_tl, embd_br = self.embd_tl[ind](cnv_tl), self.embd_br[ind](cnv_br)
+        regs_tl, regs_br = self.regs_tl[ind](cnv_tl), self.regs_br[ind](cnv_br)
+
+        hmap_ct = self.hmap_ct[ind](cnv_ct)
+        regs_ct = self.regs_ct[ind](cnv_ct)
+
+        outs.append([hmap_tl, hmap_br, hmap_ct, embd_tl, embd_br, regs_tl, regs_br, regs_ct])
 
       if ind < self.nstack - 1:
         inter = self.inters_[ind](inter) + self.cnvs_[ind](cnv)
@@ -156,15 +259,18 @@ class exkp(nn.Module):
     return outs
 
 
+# tiny hourglass is for f**king debug
 get_hourglass = \
   {'large_hourglass':
      exkp(n=5, nstack=2, dims=[256, 256, 384, 384, 384, 512], modules=[2, 2, 2, 2, 2, 4]),
    'small_hourglass':
-     exkp(n=5, nstack=1, dims=[256, 256, 384, 384, 384, 512], modules=[2, 2, 2, 2, 2, 4])}
+     exkp(n=5, nstack=1, dims=[256, 256, 384, 384, 384, 512], modules=[2, 2, 2, 2, 2, 4]),
+   'tiny_hourglass':
+     exkp(n=5, nstack=1, dims=[256, 128, 256, 256, 256, 384], modules=[2, 2, 2, 2, 2, 4])}
 
 if __name__ == '__main__':
-  from collections import OrderedDict
-  from utils.utils import count_parameters, count_flops, load_model
+  import time
+  import pickle
 
 
   def hook(self, input, output):
@@ -172,15 +278,13 @@ if __name__ == '__main__':
     # pass
 
 
-  net = get_hourglass['large_hourglass']
-  load_model(net, '../ckpt/pretrain/checkpoint.t7')
-  count_parameters(net)
-  count_flops(net, input_size=512)
+  net = get_hourglass['tiny_hourglass']
+
+  print("Total param size = %f MB" % (sum(v.numel() for v in net.parameters()) / 1024 / 1024))
 
   for m in net.modules():
     if isinstance(m, nn.Conv2d):
       m.register_forward_hook(hook)
 
-  with torch.no_grad():
-    y = net(torch.randn(2, 3, 512, 512).cuda())
+  y = net(torch.randn(2, 3, 512, 512))
   # print(y.size())
