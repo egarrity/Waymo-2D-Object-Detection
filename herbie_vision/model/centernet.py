@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from lib.cpool import TopPool, BottomPool, LeftPool, RightPool
+from herbie_vision.model.lib.cpool import TopPool, BottomPool, LeftPool, RightPool
 
 
 class pool(nn.Module):

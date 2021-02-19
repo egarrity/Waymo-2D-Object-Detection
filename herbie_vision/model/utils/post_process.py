@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from ..utils.utils import _gather_feature, _tranpose_and_gather_feature, flip_tensor # alter import for now
+from herbie_vision.model.utils.utils import _gather_feature, _tranpose_and_gather_feature, flip_tensor # alter import for now
 
 
 def _nms(heat, kernel=3):
